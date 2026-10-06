@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>福州应急资源查询系统</title>
+
+    <!-- OpenLayers -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v8.2.0/ol.css" />
+    <script src="https://cdn.jsdelivr.net/npm/ol@v8.2.0/dist/ol.js"></script>
+
+    <!-- ArcGIS Maps SDK -->
+    <link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css" />
+    <script src="https://js.arcgis.com/4.29/"></script>
+
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        #map { width:100%; height:100vh; position:absolute; top:0; left:0; }
+        .controls {
+            position:absolute; top:10px; right:10px; z-index:1000;
+            background:rgba(255,255,255,0.95); padding:10px; border-radius:10px;
+            box-shadow:0 2px 12px rgba(0,0,0,0.2); display:flex; flex-wrap:wrap; gap:6px; max-width:260px;
+        }
+        .controls select, .controls input { padding:6px; border:1px solid #ccc; border-radius:5px; font-size:13px; }
+        .controls button {
+            padding:6px 14px; border:none; border-radius:5px; cursor:pointer;
+            background:#007aff; color:white; font-size:13px; font-weight:500;
+        }
+        .controls button:hover { background:#0055cc; }
+        .controls button.clear-btn { background:#ff3b30; }
+        .controls button.clear-btn:hover { background:#cc2a1f; }
+        .title {
+            position:absolute; top:10px; left:10px; z-index:1000;
+            background:rgba(0,0,0,0.65); color:white; padding:8px 16px;
+            border-radius:20px; font-size:15px; font-weight:bold;
+            backdrop-filter:blur(4px); pointer-events:none;
+        }
+        .info {
+            position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+            width:90%; max-width:460px; background:rgba(0,0,0,0.78);
+            color:white; padding:14px 20px; border-radius:12px; font-size:14px;
+            z-index:1000; line-height:1.9; backdrop-filter:blur(6px);
+            box-shadow:0 4px 20px rgba(0,0,0,0.3);
+        }
+        .legend {
+            position:absolute; bottom:90px; left:10px; z-index:1000;
+            background:rgba(0,0,0,0.75); padding:10px 14px; border-radius:8px;
+            color:white; font-size:13px; backdrop-filter:blur(5px); min-width:140px;
+        }
+        .legend-title { font-size:14px; font-weight:bold; margin-bottom:6px; text-align:center; border-bottom:1px solid rgba(255,255,255,0.3); padding-bottom:4px; }
+        .legend-item { display:flex; align-items:center; margin-bottom:4px; }
+        .legend-item:last-child { margin-bottom:0; }
+        .legend-color { width:14px; height:14px; border-radius:50%; margin-right:8px; border:1px solid white; flex-shrink:0; }
+        .legend-color.hospital { background-color:#e74c3c; }
+        .legend-color.police { background-color:#3498db; }
+        .legend-color.fire { background-color:#e67e22; }
+        .ol-tooltip {
+            position:absolute; background:rgba(0,0,0,0.85); color:white;
+            padding:5px 10px; border-radius:5px; font-size:13px; font-weight:bold;
+            white-space:nowrap; pointer-events:none; z-index:2000;
+            transform:translate(-50%,-32px); box-shadow:0 2px 8px rgba(0,0,0,0.3);
+        }
+        .ol-tooltip::after {
+            content:''; position:absolute; bottom:-5px; left:50%;
+            transform:translateX(-50%);
+            border:5px solid transparent; border-top-color:rgba(0,0,0,0.85);
+        }
+        @media (max-width:500px) {
+            .controls { max-width:200px; padding:8px; }
+            .controls button { font-size:12px; padding:5px 10px; }
+            .info { font-size:13px; padding:10px 14px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="title">🚑 福州应急资源查询系统</div>
+
+    <div class="legend">
+        <div class="legend-title">📋 图例</div>
+        <div class="legend-item"><div class="legend-color hospital"></div><span>🏥 医院</span></div>
+        <div class="legend-item"><div class="legend-color police"></div><span>👮 派出所</span></div>
+        <div class="legend-item"><div class="legend-color fire"></div><span>🔥 消防站</span></div>
+    </div>
+
+    <div class="controls">
+        <select id="baseMapSelect" style="width:100%;margin-bottom:4px;">
+            <option value="vector">🗺️ 电子底图</option>
+            <option value="satellite">🛰️ 影像底图</option>
+        </select>
+        <button id="btnCenter">📍 中心</button>
+        <input id="radiusInput" type="number" value="2" min="0.5" max="50" step="0.5" style="width:56px;" />
+        <button id="btnQuery">🔍 查询</button>
+        <button id="btnClear" class="clear-btn">🗑️ 清除</button>
+    </div>
+
+    <div class="info" id="infoPanel">💡 点击地图选位置，或直接点击「查询」按钮</div>
+
+    <script>
+    // ==============================================
+    // 1. 基础配置
+    // ==============================================
+    const DEFAULT_CENTER = [119.3100, 26.0650];
+    const DEFAULT_ZOOM = 11.5;
+
+    // 福州应急资源点数据
+    const emergencyPoints = [
+        // --- 医院 (16) ---
+        { id:1,  name:"🏥 福建省立医院",     type:"医院", lon:119.3078, lat:26.0908 },
+        { id:2,  name:"🏥 福建协和医院",     type:"医院", lon:119.3005, lat:26.0812 },
+        { id:3,  name:"🏥 福建附一医院",     type:"医院", lon:119.3102, lat:26.0598 },
+        { id:4,  name:"🏥 第九〇〇医院",     type:"医院", lon:119.2880, lat:26.0935 },
+        { id:5,  name:"🏥 福建省肿瘤医院",   type:"医院", lon:119.3480, lat:26.0730 },
+        { id:6,  name:"🏥 省妇幼保健院",     type:"医院", lon:119.2968, lat:26.0825 },
+        { id:7,  name:"🏥 省人民医院",       type:"医院", lon:119.3090, lat:26.0630 },
+        { id:8,  name:"🏥 省二人民医院",     type:"医院", lon:119.3025, lat:26.0968 },
+        { id:9,  name:"🏥 福州市一医院",     type:"医院", lon:119.3125, lat:26.0623 },
+        { id:10, name:"🏥 福州市二医院",     type:"医院", lon:119.3248, lat:26.0405 },
+        { id:11, name:"🏥 福州市中医院",     type:"医院", lon:119.2965, lat:26.0842 },
+        { id:12, name:"🏥 孟超肝胆医院",     type:"医院", lon:119.2900, lat:26.0740 },
+        { id:13, name:"🏥 福州儿童医院",     type:"医院", lon:119.3040, lat:26.0780 },
+        { id:14, name:"🏥 市皮肤病防治院",   type:"医院", lon:119.2995, lat:26.0745 },
+        { id:15, name:"🏥 福州市第六医院",   type:"医院", lon:119.3160, lat:26.0680 },
+        { id:16, name:"🏥 福州市第八医院",   type:"医院", lon:119.3210, lat:26.0840 },
+
+        // --- 派出所 (46) 鼓楼区 ---
+        { id:17, name:"👮 东街派出所",    type:"派出所", lon:119.3005, lat:26.0812 },
+        { id:18, name:"👮 南街派出所",    type:"派出所", lon:119.2965, lat:26.0795 },
+        { id:19, name:"👮 鼓东派出所",    type:"派出所", lon:119.2990, lat:26.0840 },
+        { id:20, name:"👮 鼓西派出所",    type:"派出所", lon:119.2905, lat:26.0850 },
+        { id:21, name:"👮 温泉派出所",    type:"派出所", lon:119.3110, lat:26.0910 },
+        { id:22, name:"👮 华大派出所",    type:"派出所", lon:119.2975, lat:26.0960 },
+        { id:23, name:"👮 水部派出所",    type:"派出所", lon:119.3100, lat:26.0785 },
+        { id:24, name:"👮 安泰派出所",    type:"派出所", lon:119.3020, lat:26.0750 },
+        { id:25, name:"👮 五凤派出所",    type:"派出所", lon:119.2800, lat:26.1000 },
+        { id:26, name:"👮 洪山派出所",    type:"派出所", lon:119.2850, lat:26.0720 },
+        { id:27, name:"👮 鼓楼巡特警",    type:"派出所", lon:119.2930, lat:26.0870 },
+        // 台江区
+        { id:28, name:"👮 茶亭派出所",    type:"派出所", lon:119.3105, lat:26.0615 },
+        { id:29, name:"👮 洋中派出所",    type:"派出所", lon:119.3060, lat:26.0640 },
+        { id:30, name:"👮 后洲派出所",    type:"派出所", lon:119.3120, lat:26.0605 },
+        { id:31, name:"👮 瀛洲派出所",    type:"派出所", lon:119.3220, lat:26.0590 },
+        { id:32, name:"👮 新港派出所",    type:"派出所", lon:119.3200, lat:26.0670 },
+        { id:33, name:"👮 宁化派出所",    type:"派出所", lon:119.2880, lat:26.0590 },
+        { id:34, name:"👮 上海派出所",    type:"派出所", lon:119.2960, lat:26.0640 },
+        { id:35, name:"👮 苍霞派出所",    type:"派出所", lon:119.3040, lat:26.0550 },
+        { id:36, name:"👮 义洲派出所",    type:"派出所", lon:119.2900, lat:26.0600 },
+        { id:37, name:"👮 鳌峰派出所",    type:"派出所", lon:119.3350, lat:26.0580 },
+        // 仓山区
+        { id:38, name:"👮 对湖派出所",    type:"派出所", lon:119.3175, lat:26.0435 },
+        { id:39, name:"👮 仓前派出所",    type:"派出所", lon:119.3150, lat:26.0470 },
+        { id:40, name:"👮 临江派出所",    type:"派出所", lon:119.3190, lat:26.0450 },
+        { id:41, name:"👮 下渡派出所",    type:"派出所", lon:119.3300, lat:26.0380 },
+        { id:42, name:"👮 三叉街派出所",  type:"派出所", lon:119.3250, lat:26.0350 },
+        { id:43, name:"👮 上渡派出所",    type:"派出所", lon:119.2850, lat:26.0350 },
+        { id:44, name:"👮 金山派出所",    type:"派出所", lon:119.2700, lat:26.0450 },
+        { id:45, name:"👮 建新派出所",    type:"派出所", lon:119.2600, lat:26.0550 },
+        { id:46, name:"👮 盖山派出所",    type:"派出所", lon:119.3380, lat:26.0220 },
+        { id:47, name:"👮 城门派出所",    type:"派出所", lon:119.3550, lat:26.0150 },
+        { id:48, name:"👮 螺洲派出所",    type:"派出所", lon:119.3480, lat:26.0080 },
+        { id:49, name:"👮 淮安派出所",    type:"派出所", lon:119.2480, lat:26.0650 },
+        { id:50, name:"👮 金山派出所(分)", type:"派出所", lon:119.2750, lat:26.0500 },
+        // 晋安区
+        { id:51, name:"👮 岳峰派出所",    type:"派出所", lon:119.3280, lat:26.0880 },
+        { id:52, name:"👮 茶园派出所",    type:"派出所", lon:119.3150, lat:26.1020 },
+        { id:53, name:"👮 王庄派出所",    type:"派出所", lon:119.3200, lat:26.0750 },
+        { id:54, name:"👮 象园派出所",    type:"派出所", lon:119.3250, lat:26.0730 },
+        { id:55, name:"👮 鼓山派出所",    type:"派出所", lon:119.3450, lat:26.0820 },
+        { id:56, name:"👮 远洋派出所",    type:"派出所", lon:119.3550, lat:26.0750 },
+        { id:57, name:"👮 新店派出所",    type:"派出所", lon:119.2950, lat:26.1150 },
+        { id:58, name:"👮 火车站派出所",  type:"派出所", lon:119.3230, lat:26.1120 },
+        { id:59, name:"👮 宦溪派出所",    type:"派出所", lon:119.3900, lat:26.1500 },
+        { id:60, name:"👮 寿山派出所",    type:"派出所", lon:119.2600, lat:26.1800 },
+        { id:61, name:"👮 日溪派出所",    type:"派出所", lon:119.2500, lat:26.2500 },
+        { id:62, name:"👮 鼓涌派出所",    type:"派出所", lon:119.3800, lat:26.0600 },
+
+        // --- 消防站 (23) ---
+        { id:63, name:"🔥 鼓楼水部消防站",       type:"消防站", lon:119.3080, lat:26.0800 },
+        { id:64, name:"🔥 台江上浦消防站",       type:"消防站", lon:119.2850, lat:26.0580 },
+        { id:65, name:"🔥 台江上下杭消防站",     type:"消防站", lon:119.3050, lat:26.0570 },
+        { id:66, name:"🔥 台江鳌峰消防站",       type:"消防站", lon:119.3380, lat:26.0550 },
+        { id:67, name:"🔥 台江瀛洲消防站",       type:"消防站", lon:119.3250, lat:26.0600 },
+        { id:68, name:"🔥 仓山花海公园消防站",   type:"消防站", lon:119.3350, lat:26.0450 },
+        { id:69, name:"🔥 仓山清凉山消防站",     type:"消防站", lon:119.3620, lat:26.0050 },
+        { id:70, name:"🔥 仓山海峡会展中心站",   type:"消防站", lon:119.3580, lat:26.0250 },
+        { id:71, name:"🔥 仓山吴山消防站",       type:"消防站", lon:119.2960, lat:26.0150 },
+        { id:72, name:"🔥 仓山三江口消防站",     type:"消防站", lon:119.3800, lat:26.0000 },
+        { id:73, name:"🔥 仓山飞凤消防站",       type:"消防站", lon:119.2650, lat:26.0300 },
+        { id:74, name:"🔥 仓山东升消防站",       type:"消防站", lon:119.3100, lat:26.0350 },
+        { id:75, name:"🔥 仓山林浦消防站",       type:"消防站", lon:119.3700, lat:26.0400 },
+        { id:76, name:"🔥 仓山淮安消防站",       type:"消防站", lon:119.2450, lat:26.0700 },
+        { id:78, name:"🔥 马尾快安消防站",       type:"消防站", lon:119.3720, lat:25.9980 },
+        { id:79, name:"🔥 长乐航城消防站",       type:"消防站", lon:119.5150, lat:25.9620 },
+        { id:80, name:"🔥 福清宏路消防站",       type:"消防站", lon:119.3300, lat:25.7100 },
+        { id:81, name:"🔥 闽侯甘蔗消防站",       type:"消防站", lon:119.1530, lat:26.1520 },
+        { id:82, name:"🔥 连江凤城消防站",       type:"消防站", lon:119.5380, lat:26.1980 },
+        { id:83, name:"🔥 罗源开发区消防站",     type:"消防站", lon:119.5520, lat:26.4920 },
+        { id:84, name:"🔥 闽清梅溪消防站",       type:"消防站", lon:118.8630, lat:26.2230 },
+        { id:85, name:"🔥 永泰樟城消防站",       type:"消防站", lon:118.9390, lat:25.8680 }
+    ];
+
+    // ==============================================
+    // 2. OpenLayers 地图初始化
+    // ==============================================
+    var map = new ol.Map({
+        target: 'map',
+        view: new ol.View({
+            center: ol.proj.fromLonLat(DEFAULT_CENTER),
+            zoom: DEFAULT_ZOOM,
+            minZoom: 8,
+            maxZoom: 18
+        }),
+        controls: []
+    });
+
+    // --- 底图图层 ---
+    var gaodeVectorLayer = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+            url: 'https://webrd0{1-4}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}',
+            crossOrigin: 'anonymous'
+        })
+    });
+    var gaodeSatelliteLayer = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+            url: 'https://webst0{1-4}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+            crossOrigin: 'anonymous'
+        }),
+        visible: false
+    });
+    map.addLayer(gaodeVectorLayer);
+    map.addLayer(gaodeSatelliteLayer);
+
+    // --- 资源点标注图层 ---
+    var markerLayer = new ol.layer.Vector({ source: new ol.source.Vector() });
+    var featureToName = new Map();
+    var allFeatures = [];
+    emergencyPoints.forEach(function(p) {
+        var f = new ol.Feature({
+            geometry: new ol.geom.Point(ol.proj.fromLonLat([p.lon, p.lat])),
+            name: p.name,
+            type: p.type
+        });
+        allFeatures.push(f);
+        featureToName.set(f, p.name);
+    });
+    markerLayer.getSource().addFeatures(allFeatures);
+    markerLayer.setStyle(function(f) {
+        var color, sym;
+        if (f.get('type') === '医院')   { color = '#e74c3c'; sym = '✚'; }
+        else if (f.get('type') === '派出所') { color = '#3498db'; sym = '👮'; }
+        else { color = '#e67e22'; sym = '🔥'; }
+        return new ol.style.Style({
+            image: new ol.style.Circle({ radius:12, fill:new ol.style.Fill({color:color}), stroke:new ol.style.Stroke({color:'#fff',width:2}) }),
+            text: new ol.style.Text({ text:sym, font:'bold 11px sans-serif', fill:new ol.style.Fill({color:'#fff'}) })
+        });
+    });
+    map.addLayer(markerLayer);
+
+    // --- 缓冲区图层 ---
+    var bufferLayer = new ol.layer.Vector({ source: new ol.source.Vector() });
+    bufferLayer.setStyle(new ol.style.Style({
+        stroke: new ol.style.Stroke({ color:'#ff6600', width:3 }),
+        fill: new ol.style.Fill({ color:'rgba(255,102,0,0.18)' })
+    }));
+    map.addLayer(bufferLayer);
+
+    // --- 查询结果高亮图层 ---
+    var resultLayer = new ol.layer.Vector({ source: new ol.source.Vector() });
+    resultLayer.setStyle(new ol.style.Style({
+        image: new ol.style.Circle({ radius:16, fill:new ol.style.Fill({color:'#ff0044'}), stroke:new ol.style.Stroke({color:'#ffff00',width:3}) })
+    }));
+    map.addLayer(resultLayer);
+
+    // ==============================================
+    // 3. 底图切换
+    // ==============================================
+    document.getElementById('baseMapSelect').addEventListener('change', function() {
+        var val = this.value;
+        gaodeVectorLayer.setVisible(val === 'vector');
+        gaodeSatelliteLayer.setVisible(val === 'satellite');
+    });
+
+    // ==============================================
+    // 4. 悬停提示 + 点击选点
+    // ==============================================
+    var tooltip = null;
+    map.on('pointermove', function(e) {
+        var f = map.forEachFeatureAtPixel(e.pixel, function(f) { return f; }, { layerFilter: function(l) { return l === markerLayer; } });
+        if (f && featureToName.has(f)) {
+            if (!tooltip) { tooltip = document.createElement('div'); tooltip.className = 'ol-tooltip'; document.body.appendChild(tooltip); }
+            tooltip.innerHTML = featureToName.get(f);
+            tooltip.style.left = e.pixel[0] + 'px';
+            tooltip.style.top = (e.pixel[1] - 20) + 'px';
+            tooltip.style.display = 'block';
+        } else {
+            if (tooltip) tooltip.style.display = 'none';
+        }
+    });
+
+    map.on('click', function(e) {
+        var c = ol.proj.toLonLat(e.coordinate);
+        var lon = Number(c[0].toFixed(6));
+        var lat = Number(c[1].toFixed(6));
+        window.currentClickLon = lon;
+        window.currentClickLat = lat;
+        document.getElementById('infoPanel').innerHTML = '📍 已选位置：' + lon + ', ' + lat;
+        // 通知 ArkTS 侧（满足实验作业要求：在 ArkTS 日志中输出坐标）
+        callNative('onMapClick', lon, lat);
+    });
+
+    // ==============================================
+    // 5. 工具函数
+    // ==============================================
+    function goToLocation(lon, lat, z) {
+        map.getView().animate({ center: ol.proj.fromLonLat([lon, lat]), duration: 400 });
+        if (z) map.getView().animate({ zoom: z, duration: 400 });
+    }
+
+    function clearGraphics() {
+        bufferLayer.getSource().clear();
+        resultLayer.getSource().clear();
+        document.getElementById('infoPanel').innerHTML = '🗑️ 已清除所有图形';
+    }
+
+    function calcDistance(lat1, lon1, lat2, lon2) {
+        var R = 6371;
+        var dLat = (lat2 - lat1) * Math.PI / 180;
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    // 暴露全局函数供 ArkTS 调用
+    window.goToLocation = goToLocation;
+    window.clearGraphics = clearGraphics;
+
+    // ==============================================
+    // 6. NativeBridge 连接检测
+    // ==============================================
+    window.bridgeReady = false;
+
+    function waitForBridge() {
+        if (window.NativeBridge && typeof window.NativeBridge.saveOperation === 'function') {
+            window.bridgeReady = true;
+            console.log('✅ NativeBridge 连接就绪');
+            return;
+        }
+        setTimeout(waitForBridge, 300);
+    }
+    waitForBridge();
+
+    // ==============================================
+    // 7. 通用 NativeBridge 调用工具
+    // ==============================================
+    function callNative(methodName) {
+        try {
+            if (!window.NativeBridge) return;
+            var args = Array.prototype.slice.call(arguments, 1);
+            var fn = window.NativeBridge[methodName];
+            if (typeof fn === 'function') {
+                fn.apply(window.NativeBridge, args);
+            }
+        } catch (e) {
+            console.error('callNative error:', e);
+        }
+    }
+
+    // ==============================================
+    // 8. 保存操作记录 → ArkTS (数据库日志)
+    // ==============================================
+    function saveHistory(lon, lat, r, total, h, p, f) {
+        if (!window.bridgeReady || !window.NativeBridge) {
+            console.log('⏳ bridge 未就绪，跳过保存');
+            return;
+        }
+        try {
+            var data = {
+                center_lon: Number(lon),
+                center_lat: Number(lat),
+                radius_km: Number(r),
+                result_count: total,
+                hospital_count: h,
+                police_count: p,
+                fire_count: f,
+                summary: '半径' + r + 'km，共' + total + '个应急资源 (医院' + h + ', 派出所' + p + ', 消防站' + f + ')'
+            };
+            callNative('saveOperation', JSON.stringify(data));
+            console.log('✅ 历史记录已保存');
+        } catch (e) {
+            console.error('❌ 保存失败:', e);
+        }
+    }
+
+    // ==============================================
+    // 9. ArcGIS 初始化
+    // ==============================================
+    var ArcGISGraphic, ArcGISPoint, ArcGISFeatureLayer, ArcGISgeometryEngine;
+    var pointLayer = null;
+
+    require([
+        'esri/Graphic',
+        'esri/geometry/Point',
+        'esri/layers/FeatureLayer',
+        'esri/geometry/geometryEngine'
+    ], function(Graphic, Point, FeatureLayer, geometryEngine) {
+        ArcGISGraphic = Graphic;
+        ArcGISPoint = Point;
+        ArcGISFeatureLayer = FeatureLayer;
+        ArcGISgeometryEngine = geometryEngine;
+
+        // 构建客户端要素图层
+        var gfx = [];
+        emergencyPoints.forEach(function(p, i) {
+            var pt = new ArcGISPoint({
+                longitude: p.lon,
+                latitude: p.lat,
+                spatialReference: { wkid: 4326 }
+            });
+            gfx.push(new ArcGISGraphic({
+                geometry: pt,
+                attributes: {
+                    id: i + 1,
+                    name: p.name,
+                    type: p.type,
+                    lon: p.lon,
+                    lat: p.lat
+                }
+            }));
+        });
+
+        pointLayer = new ArcGISFeatureLayer({
+            source: gfx,
+            objectIdField: 'id',
+            fields: [
+                { name: 'id',   type: 'integer' },
+                { name: 'name', type: 'string' },
+                { name: 'type', type: 'string' },
+                { name: 'lon',  type: 'double' },
+                { name: 'lat',  type: 'double' }
+            ],
+            outFields: ['*']
+        });
+
+        console.log('✅ ArcGIS JS 模块加载完成，' + emergencyPoints.length + ' 个资源点就绪');
+    });
+
+    // ==============================================
+    // 10. 核心查询：缓冲区空间查询 + 空间分析
+    // ==============================================
+    window.queryEmergencyResources = function() {
+        if (window.currentClickLon === undefined || window.currentClickLat === undefined) {
+            // 缺省使用福州中心
+            window.currentClickLon = DEFAULT_CENTER[0];
+            window.currentClickLat = DEFAULT_CENTER[1];
+            document.getElementById('infoPanel').innerHTML = '📍 使用默认中心 ' + DEFAULT_CENTER[0] + ', ' + DEFAULT_CENTER[1];
+        }
+
+        if (!ArcGISgeometryEngine || !pointLayer) {
+            alert('⏳ ArcGIS 模块尚未加载完成，请稍后再试');
+            return;
+        }
+
+        var r = parseFloat(document.getElementById('radiusInput').value) || 2;
+        var lon = window.currentClickLon;
+        var lat = window.currentClickLat;
+
+        // 创建 ArcGIS 中心点
+        var centerPoint = new ArcGISPoint({
+            longitude: lon,
+            latitude: lat,
+            spatialReference: { wkid: 4326 }
+        });
+
+        // 计算测地线缓冲区
+        var bufferGeometry = ArcGISgeometryEngine.geodesicBuffer(centerPoint, r, 'kilometers');
+
+        // 在 OL 上绘制缓冲区
+        bufferLayer.getSource().clear();
+        var coords = bufferGeometry.rings[0].map(function(c) {
+            return ol.proj.fromLonLat(c);
+        });
+        bufferLayer.getSource().addFeature(new ol.Feature({
+            geometry: new ol.geom.Polygon([coords])
+        }));
+
+        // 空间查询：找出与缓冲区相交的所有点
+        var query = pointLayer.createQuery();
+        query.geometry = bufferGeometry;
+        query.spatialRelationship = 'intersects';
+        query.returnGeometry = true;
+        query.outFields = ['*'];
+
+        pointLayer.queryFeatures(query).then(function(result) {
+            resultLayer.getSource().clear();
+
+            var features = result.features || [];
+            var h = 0, p = 0, f = 0;
+            var dists = [];
+
+            features.forEach(function(feat) {
+                var attrs = feat.attributes;
+                var flon = attrs.lon;
+                var flat = attrs.lat;
+                if (attrs.type === '医院')   h++;
+                else if (attrs.type === '派出所') p++;
+                else if (attrs.type === '消防站') f++;
+
+                dists.push(calcDistance(lat, lon, flat, flon));
+
+                // 在 OL 上高亮命中点
+                resultLayer.getSource().addFeature(new ol.Feature({
+                    geometry: new ol.geom.Point(ol.proj.fromLonLat([flon, flat]))
+                }));
+            });
+
+            // 统计信息
+            var min = dists.length ? Math.min.apply(null, dists).toFixed(2) : '--';
+            var max = dists.length ? Math.max.apply(null, dists).toFixed(2) : '--';
+            var avg = dists.length ? (dists.reduce(function(a,b) { return a+b; }, 0) / dists.length).toFixed(2) : '--';
+
+            document.getElementById('infoPanel').innerHTML =
+                '📊 半径 ' + r + 'km 查询结果<br>' +
+                '总数：' + features.length + ' 个<br>' +
+                '🏥 医院：' + h + '  |  👮 派出所：' + p + '  |  🔥 消防站：' + f + '<br>' +
+                '最近：' + min + 'km  |  最远：' + max + 'km  |  平均：' + avg + 'km';
+
+            // ✅ 保存到本地数据库
+            saveHistory(lon, lat, r, features.length, h, p, f);
+        }).catch(function(err) {
+            console.error('❌ 空间查询失败:', err);
+            document.getElementById('infoPanel').innerHTML = '❌ 空间查询失败: ' + (err.message || '未知错误');
+        });
+    };
+
+    // ==============================================
+    // 11. 恢复历史查询（由 ArkTS 调用）
+    // ==============================================
+    window.restoreQuery = function(data) {
+        if (!data) {
+            console.warn('⚠️ restoreQuery 收到空数据');
+            return;
+        }
+
+        var lon = data.center_lon || DEFAULT_CENTER[0];
+        var lat = data.center_lat || DEFAULT_CENTER[1];
+        var r = data.radius_km || 2;
+
+        // 1. 设置全局点击坐标
+        window.currentClickLon = lon;
+        window.currentClickLat = lat;
+
+        // 2. 设置半径输入框
+        document.getElementById('radiusInput').value = r;
+
+        // 3. 地图飞到目标位置
+        map.getView().animate({
+            center: ol.proj.fromLonLat([lon, lat]),
+            zoom: 12,
+            duration: 600
+        });
+
+        // 4. 显示恢复信息
+        var summary = data.summary || ('恢复查询: 半径' + r + 'km');
+        document.getElementById('infoPanel').innerHTML = '⏳ 正在恢复: ' + summary;
+
+        // 5. 延迟执行空间查询（等 ArcGIS 模块就绪 + 地图动画完成）
+        setTimeout(function() {
+            window.queryEmergencyResources();
+        }, 800);
+
+        console.log('✅ restoreQuery 完成: lon=' + lon + ', lat=' + lat + ', radius=' + r);
+    };
+
+    // ==============================================
+    // 12. 注册按钮事件
+    // ==============================================
+    document.getElementById('btnCenter').onclick = function() {
+        goToLocation(DEFAULT_CENTER[0], DEFAULT_CENTER[1], DEFAULT_ZOOM);
+    };
+    document.getElementById('btnClear').onclick = clearGraphics;
+    document.getElementById('btnQuery').onclick = window.queryEmergencyResources;
+
+    // 回车触查询
+    document.getElementById('radiusInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') window.queryEmergencyResources();
+    });
+
+    console.log('✅ 福州应急资源查询系统加载完成');
+    </script>
+</body>
+</html>
